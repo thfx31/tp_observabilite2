@@ -1,0 +1,69 @@
+// 1. Découverte dynamique des conteneurs
+discovery.docker "local_containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2. Relabeling des Cibles (Targets)
+discovery.relabel "clean_labels" {
+  targets = discovery.docker.local_containers.targets
+
+  // Conserver le nom du conteneur
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // TÂCHE A : On expose temporairement l'ID du conteneur pour simuler un label natif encombrant
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    target_label  = "container_id"
+  }
+
+  // TÂCHE B : Ajout d'un label statique 'environment'
+  rule {
+    target_label = "environment"
+    replacement  = "development"
+  }
+}
+
+// 3. Collecte des logs
+loki.source.docker "container_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.clean_labels.output
+  forward_to = [loki.relabel.drop_unwanted_labels.receiver]
+}
+
+// 4. TÂCHE A (Suite) : Suppression du label natif 'container_id' du flux de logs
+loki.relabel "drop_unwanted_labels" {
+  forward_to = [loki.process.extract_loglevel.receiver]
+
+  rule {
+    action = "labeldrop"
+    regex  = "container_id"
+  }
+}
+
+// 5. TÂCHE C : Extraction dynamique du 'loglevel' depuis le corps du log
+loki.process "extract_loglevel" {
+  forward_to = [loki.write.loki_backend.receiver]
+
+  // On cherche un motif du type "level=info" ou "level=error" dans la ligne de log
+  stage.regex {
+    expression = "level=(?P<extracted_level>\\w+)"
+  }
+
+  // On promeut la valeur extraite en tant que vrai label Loki indexé
+  stage.labels {
+    values = {
+      loglevel = "extracted_level",
+    }
+  }
+}
+
+// 6. Envoi final vers Loki
+loki.write "loki_backend" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

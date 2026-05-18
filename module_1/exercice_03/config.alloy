@@ -1,0 +1,86 @@
+// ============================================================================
+// PIPELINE 1 : COLLECTE ET MULTIPLEXAGE DES LOGS DOCKER (EXERCICES 1 & 2)
+// ============================================================================
+
+// 1. Découverte dynamique des conteneurs via le socket
+discovery.docker "local_containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2. Relabeling initial : Injection de labels statiques et gestion des noms
+discovery.relabel "clean_labels" {
+  targets = discovery.docker.local_containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_id"]
+    target_label  = "container_id"
+  }
+
+  rule {
+    target_label = "environment"
+    replacement  = "development"
+  }
+}
+
+// 3. Lecture active des flux de logs Docker
+loki.source.docker "container_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.clean_labels.output
+  forward_to = [loki.relabel.drop_unwanted_labels.receiver]
+}
+
+// 4. Drop sélectif de l'ID conteneur pour préserver la cardinalité de Loki
+loki.relabel "drop_unwanted_labels" {
+  forward_to = [loki.process.extract_loglevel.receiver]
+
+  rule {
+    action = "labeldrop"
+    regex  = "container_id"
+  }
+}
+
+// 5. Analyse de contenu : Extraction dynamique du loglevel si présent
+loki.process "extract_loglevel" {
+  forward_to = [loki.write.loki_backend.receiver]
+
+  stage.regex {
+    expression = "level=(?P<extracted_level>\\w+)"
+  }
+
+  stage.labels {
+    values = {
+      loglevel = "extracted_level",
+    }
+  }
+}
+
+// ============================================================================
+// PIPELINE 2 : LOGS DE FICHIERS STATIQUES & GESTION DES INODES (EXERCICE 3)
+// ============================================================================
+
+// 1. Surveillance dynamique du dossier d'application
+local.file_match "app_files" {
+  path_targets = [{"__path__" = "/var/log/apps/*.log"}]
+}
+
+// 2. Consommation des fichiers (gère nativement les offsets via positions.yaml)
+loki.source.file "app_logs_file" {
+  targets    = local.file_match.app_files.targets
+  forward_to = [loki.write.loki_backend.receiver]
+}
+
+// ============================================================================
+// BACKEND D'EXPÉDITION LOGIQUE UNIQUE
+// ============================================================================
+
+loki.write "loki_backend" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

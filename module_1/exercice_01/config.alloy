@@ -1,0 +1,29 @@
+// 1. Découverte des conteneurs Docker locaux
+discovery.docker "local_containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2. Réécriture des labels internes (On transforme __meta_docker_container_name en "container")
+discovery.relabel "clean_labels" {
+  targets = discovery.docker.local_containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)" // Docker met souvent un "/" devant le nom, on l'enlève ici
+    target_label  = "container"
+  }
+}
+
+// 3. Collecte des logs des conteneurs avec les labels nettoyés
+loki.source.docker "container_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.clean_labels.output
+  forward_to = [loki.write.loki_backend.receiver]
+}
+
+// 4. Envoi des logs vers l'instance Loki
+loki.write "loki_backend" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
